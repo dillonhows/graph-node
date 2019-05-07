@@ -55,6 +55,14 @@ impl EthereumAdapter for MockEthereumAdapter {
         unimplemented!();
     }
 
+    fn block_parent_hash(
+        &self,
+        _: &Logger,
+        _: H256,
+    ) -> Box<Future<Item = Option<H256>, Error = Error> + Send> {
+        unimplemented!();
+    }
+
     fn block_hash_by_block_number(
         &self,
         _: &Logger,
@@ -71,12 +79,52 @@ impl EthereumAdapter for MockEthereumAdapter {
         unimplemented!();
     }
 
-    fn find_first_blocks_with_logs(
+    fn calls_in_block(
+        &self,
+        _: &Logger,
+        _: u64,
+        _: H256,
+    ) -> Box<Future<Item = Vec<EthereumCall>, Error = Error> + Send> {
+        unimplemented!();
+    }
+
+    fn blocks_with_triggers(
+        &self,
+        _: &Logger,
+        _: u64,
+        _: u64,
+        _: Option<EthereumLogFilter>,
+        _: Option<EthereumCallFilter>,
+        _: Option<EthereumBlockFilter>,
+    ) -> Box<Future<Item = Vec<EthereumBlockPointer>, Error = Error> + Send> {
+        unimplemented!();
+    }
+
+    fn blocks_with_logs(
         &self,
         _: &Logger,
         _: u64,
         _: u64,
         _: EthereumLogFilter,
+    ) -> Box<Future<Item = Vec<EthereumBlockPointer>, Error = Error> + Send> {
+        unimplemented!();
+    }
+
+    fn blocks_with_calls(
+        &self,
+        _: &Logger,
+        _: u64,
+        _: u64,
+        _: EthereumCallFilter,
+    ) -> Box<Future<Item = Vec<EthereumBlockPointer>, Error = Error> + Send> {
+        unimplemented!();
+    }
+
+    fn blocks(
+        &self,
+        _: &Logger,
+        _: u64,
+        _: u64,
     ) -> Box<Future<Item = Vec<EthereumBlockPointer>, Error = Error> + Send> {
         unimplemented!();
     }
@@ -139,7 +187,9 @@ fn mock_data_source(path: &str) -> DataSource {
             language: String::from("wasm/assemblyscript"),
             entities: vec![],
             abis: vec![],
-            event_handlers: vec![],
+            event_handlers: Some(vec![]),
+            call_handlers: Some(vec![]),
+            block_handlers: Some(vec![]),
             link: Link {
                 link: "link".to_owned(),
             },
@@ -158,7 +208,9 @@ fn mock_data_source(path: &str) -> DataSource {
                 language: String::from("wasm/assemblyscript"),
                 entities: vec![],
                 abis: vec![],
-                event_handlers: vec![],
+                event_handlers: Some(vec![]),
+                call_handlers: Some(vec![]),
+                block_handlers: Some(vec![]),
                 link: Link {
                     link: "link".to_owned(),
                 },
@@ -168,11 +220,10 @@ fn mock_data_source(path: &str) -> DataSource {
     }
 }
 
-fn mock_context() -> EventHandlerContext {
-    EventHandlerContext {
+fn mock_context() -> MappingContext {
+    MappingContext {
         logger: Logger::root(slog::Discard, o!()),
         block: Default::default(),
-        transaction: Default::default(),
         state: BlockState::default(),
     }
 }

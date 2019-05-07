@@ -1,5 +1,20 @@
+use std::collections::HashMap;
+
 use ethabi::LogParam;
 use web3::types::*;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct EthereumBlockWithTriggers {
+    pub ethereum_block: EthereumBlock,
+    pub triggers: Vec<EthereumTrigger>,
+    pub calls: Option<Vec<EthereumCall>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct EthereumBlockWithCalls {
+    pub ethereum_block: EthereumBlock,
+    pub calls: Option<Vec<EthereumCall>>,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EthereumBlock {
@@ -10,6 +25,12 @@ pub struct EthereumBlock {
 impl EthereumBlock {
     pub fn transaction_for_log(&self, log: &Log) -> Option<Transaction> {
         log.transaction_hash
+            .and_then(|hash| self.block.transactions.iter().find(|tx| tx.hash == hash))
+            .cloned()
+    }
+
+    pub fn transaction_for_call(&self, call: &EthereumCall) -> Option<Transaction> {
+        call.transaction_hash
             .and_then(|hash| self.block.transactions.iter().find(|tx| tx.hash == hash))
             .cloned()
     }
@@ -39,8 +60,88 @@ impl Default for EthereumBlock {
                 uncles: vec![],
                 transactions: vec![],
                 size: None,
+                mix_hash: Some(H256::default()),
+                nonce: None,
             },
             transaction_receipts: vec![],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EthereumCall {
+    pub from: Address,
+    pub to: Address,
+    pub value: U256,
+    pub gas_used: U256,
+    pub input: Bytes,
+    pub output: Bytes,
+    pub block_number: u64,
+    pub block_hash: H256,
+    pub transaction_hash: Option<H256>,
+}
+
+impl From<&Trace> for EthereumCall {
+    fn from(trace: &Trace) -> Self {
+        let (from, to, value, input) = match &trace.action {
+            Action::Call(call) => (call.from, call.to, call.value, call.input.clone()),
+            _ => (
+                Address::zero(),
+                Address::zero(),
+                U256::zero(),
+                Bytes::from(vec![]),
+            ),
+        };
+        let (output, gas_used) = match &trace.result {
+            Some(Res::Call(result)) => (result.output.clone(), result.gas_used),
+            _ => (Bytes::from(vec![]), U256::zero()),
+        };
+        Self {
+            from: from,
+            to: to,
+            value: value,
+            gas_used: gas_used,
+            input: input,
+            output: output,
+            block_number: trace.block_number,
+            block_hash: trace.block_hash,
+            transaction_hash: trace.transaction_hash,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum EthereumTrigger {
+    Block(EthereumBlockTriggerType),
+    Call(EthereumCall),
+    Log(Log),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum EthereumBlockTriggerType {
+    Every,
+    WithCallTo(Address),
+}
+
+impl EthereumTrigger {
+    pub fn transaction_index(
+        &self,
+        transaction_hash_index_lookup: &HashMap<H256, u64>,
+    ) -> Result<Option<u64>, ()> {
+        match self {
+            EthereumTrigger::Log(log) => {
+                match transaction_hash_index_lookup.get(&log.transaction_hash.unwrap()) {
+                    Some(index) => Ok(Some(*index)),
+                    None => Err(()),
+                }
+            }
+            EthereumTrigger::Call(call) => {
+                match transaction_hash_index_lookup.get(&call.transaction_hash.unwrap()) {
+                    Some(index) => Ok(Some(*index)),
+                    None => Err(()),
+                }
+            }
+            EthereumTrigger::Block(_call) => Ok(None),
         }
     }
 }
@@ -136,6 +237,42 @@ impl Clone for EthereumEventData {
             transaction: self.transaction.clone(),
             params: self
                 .params
+                .iter()
+                .map(|log_param| LogParam {
+                    name: log_param.name.clone(),
+                    value: log_param.value.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// An Ethereum call executed within a transaction within a block to a contract address.
+#[derive(Debug)]
+pub struct EthereumCallData {
+    pub address: Address,
+    pub block: EthereumBlockData,
+    pub transaction: EthereumTransactionData,
+    pub inputs: Vec<LogParam>,
+    pub outputs: Vec<LogParam>,
+}
+
+impl Clone for EthereumCallData {
+    fn clone(&self) -> Self {
+        EthereumCallData {
+            address: self.address,
+            block: self.block.clone(),
+            transaction: self.transaction.clone(),
+            inputs: self
+                .inputs
+                .iter()
+                .map(|log_param| LogParam {
+                    name: log_param.name.clone(),
+                    value: log_param.value.clone(),
+                })
+                .collect(),
+            outputs: self
+                .outputs
                 .iter()
                 .map(|log_param| LogParam {
                     name: log_param.name.clone(),

@@ -1,6 +1,7 @@
 use futures::future::{loop_fn, Loop};
 use futures::sync::mpsc::{channel, Receiver, Sender};
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 use std::time::Duration;
@@ -10,7 +11,7 @@ use graph::data::subgraph::schema::{
     DynamicEthereumContractDataSourceEntity, SubgraphDeploymentEntity,
 };
 use graph::prelude::{SubgraphInstance as SubgraphInstanceTrait, *};
-use graph::web3::types::Log;
+use graph::util::extend::Extend;
 
 use super::SubgraphInstance;
 use crate::elastic_logger;
@@ -26,6 +27,7 @@ struct IndexingInputs<B, S, T> {
     pub stream_builder: B,
     pub host_builder: T,
     pub templates: Vec<(String, DataSourceTemplate)>,
+    pub include_calls_in_blocks: bool,
 }
 
 struct IndexingState<T>
@@ -35,7 +37,9 @@ where
     pub logger: Logger,
     pub instance: SubgraphInstance<T>,
     pub instances: SharedInstanceKeepAliveMap,
-    pub log_filter: EthereumLogFilter,
+    pub log_filter: Option<EthereumLogFilter>,
+    pub call_filter: Option<EthereumCallFilter>,
+    pub block_filter: Option<EthereumBlockFilter>,
     pub restarts: u64,
 }
 
@@ -201,8 +205,21 @@ impl SubgraphInstanceManager {
         // Clone the deployment ID for later
         let deployment_id = manifest.id.clone();
 
-        // Obtain a log filter from the manifest
-        let log_filter = EthereumLogFilter::from_iter(manifest.data_sources.iter());
+        // Obtain filters from the manifest
+        let log_filter = EthereumLogFilter::from_data_sources_opt(manifest.data_sources.iter());
+        let call_filter = EthereumCallFilter::from_data_sources_opt(manifest.data_sources.iter());
+        let block_filter = EthereumBlockFilter::from_data_sources_opt(manifest.data_sources.iter());
+
+        // Identify whether there are templates with call handlers or
+        // block handlers with call filters; in this case, we need to
+        // include calls in all blocks so we cen reprocess the block
+        // when new dynamic data sources are being created
+        let include_calls_in_blocks = templates
+            .iter()
+            .find(|(_, template)| {
+                template.has_call_handler() || template.has_block_handler_with_call_filter()
+            })
+            .is_some();
 
         // Create a subgraph instance from the manifest; this moves
         // ownership of the manifest and host builder into the new instance
@@ -216,12 +233,15 @@ impl SubgraphInstanceManager {
                 store,
                 stream_builder,
                 host_builder,
+                include_calls_in_blocks,
             },
             state: IndexingState {
                 logger,
                 instance,
                 instances,
                 log_filter,
+                call_filter,
+                block_filter,
                 restarts: 0,
             },
         };
@@ -284,6 +304,9 @@ where
             logger.clone(),
             ctx.inputs.deployment_id.clone(),
             ctx.state.log_filter.clone(),
+            ctx.state.call_filter.clone(),
+            ctx.state.block_filter.clone(),
+            ctx.inputs.include_calls_in_blocks,
         )
         .from_err()
         .cancelable(&block_stream_canceler, || CancelableError::Cancel);
@@ -392,38 +415,29 @@ fn process_block<B, S, T>(
     logger: Logger,
     ctx: IndexingContext<B, S, T>,
     block_stream_cancel_handle: CancelHandle,
-    block: EthereumBlock,
+    block: EthereumBlockWithTriggers,
 ) -> impl Future<Item = (IndexingContext<B, S, T>, bool), Error = CancelableError<Error>>
 where
     B: BlockStreamBuilder,
     S: ChainStore + Store,
     T: RuntimeHostBuilder,
 {
+    let calls = block.calls;
+    let triggers = block.triggers;
+    let block = block.ethereum_block;
+
     let logger = logger.new(o!(
         "block_number" => format!("{:?}", block.block.number.unwrap()),
         "block_hash" => format!("{:?}", block.block.hash.unwrap())
     ));
 
-    // Extract logs relevant to the subgraph
-    let logs: Vec<_> = block
-        .transaction_receipts
-        .iter()
-        .flat_map(|receipt| {
-            receipt
-                .logs
-                .iter()
-                .filter(|log| ctx.state.instance.matches_log(&log))
-        })
-        .cloned()
-        .collect();
-
-    if logs.len() == 1 {
-        info!(logger, "1 event found in this block for this subgraph");
-    } else if logs.len() > 1 {
+    if triggers.len() == 1 {
+        info!(logger, "1 trigger found in this block for this subgraph");
+    } else if triggers.len() > 1 {
         info!(
             logger,
-            "{} events found in this block for this subgraph",
-            logs.len()
+            "{} triggers found in this block for this subgraph",
+            triggers.len()
         );
     }
 
@@ -441,62 +455,58 @@ where
 
     // Process events one after the other, passing in entity operations
     // collected previously to every new event being processed
-    process_logs(
+    process_triggers(
         logger.clone(),
         ctx,
         BlockState::default(),
         block.clone(),
-        logs,
+        triggers,
     )
     .and_then(|(ctx, block_state)| {
         // Instantiate dynamic data sources
         create_dynamic_data_sources(logger1, ctx, block_state).from_err()
     })
     .and_then(move |(ctx, block_state, data_sources, runtime_hosts)| {
-        // Reprocess the logs that only match the new data sources
-        //
-        // Note: Once we support other triggers as well, we may have to
-        // re-request the current block from the block stream's adapter
-        // and process that instead of the block we already have here.
+        // Reprocess the triggers from this block that match the new data sources
 
-        // Extract logs relevant to the new runtime hosts
-        let logs: Vec<_> = if runtime_hosts.is_empty() {
-            vec![]
-        } else {
-            block
-                .transaction_receipts
-                .iter()
-                .flat_map(|receipt| {
-                    receipt
-                        .logs
-                        .iter()
-                        .filter(|log| runtime_hosts.iter().any(|host| host.matches_log(&log)))
-                })
-                .cloned()
-                .collect()
+        let block_with_calls = EthereumBlockWithCalls {
+            ethereum_block: block.deref().clone(),
+            calls,
         };
 
-        if logs.len() == 1 {
-            info!(
-                logger,
-                "1 event found in this block for the new data sources"
-            );
-        } else if logs.len() > 1 {
-            info!(
-                logger,
-                "{} events found in this block for the new data sources",
-                logs.len()
-            );
-        }
+        future::result(<B>::Stream::parse_triggers(
+            EthereumLogFilter::from_data_sources_opt(&data_sources),
+            EthereumCallFilter::from_data_sources_opt(&data_sources),
+            EthereumBlockFilter::from_data_sources_opt(&data_sources),
+            false,
+            block_with_calls,
+        ))
+        .from_err()
+        .and_then(move |block_with_triggers| {
+            let triggers = block_with_triggers.triggers;
 
-        process_logs_in_runtime_hosts::<T>(
-            logger2.clone(),
-            runtime_hosts.clone(),
-            block_state,
-            block.clone(),
-            logs,
-        )
-        .map(move |block_state| (ctx, block_state, data_sources, runtime_hosts))
+            if triggers.len() == 1 {
+                info!(
+                    logger,
+                    "1 trigger found in this block for the new data sources"
+                );
+            } else if triggers.len() > 1 {
+                info!(
+                    logger,
+                    "{} triggers found in this block for the new data sources",
+                    triggers.len()
+                );
+            }
+
+            process_triggers_in_runtime_hosts::<T>(
+                logger2.clone(),
+                runtime_hosts.clone(),
+                block_state,
+                block.clone(),
+                triggers,
+            )
+            .map(move |block_state| (ctx, block_state, data_sources, runtime_hosts))
+        })
     })
     .and_then(move |(ctx, block_state, data_sources, runtime_hosts)| {
         // Add entity operations for the new data sources to the block state
@@ -550,56 +560,56 @@ where
     })
 }
 
-fn process_logs<B, S, T>(
+fn process_triggers<B, S, T>(
     logger: Logger,
     ctx: IndexingContext<B, S, T>,
     block_state: BlockState,
     block: Arc<EthereumBlock>,
-    logs: Vec<Log>,
+    triggers: Vec<EthereumTrigger>,
 ) -> impl Future<Item = (IndexingContext<B, S, T>, BlockState), Error = CancelableError<Error>>
 where
     B: BlockStreamBuilder,
     S: ChainStore + Store,
     T: RuntimeHostBuilder,
 {
-    stream::iter_ok::<_, CancelableError<Error>>(logs)
+    stream::iter_ok::<_, CancelableError<Error>>(triggers)
         // Process events from the block stream
-        .fold((ctx, block_state), move |(ctx, block_state), log| {
+        .fold((ctx, block_state), move |(ctx, block_state), trigger| {
             let logger = logger.clone();
             let block = block.clone();
 
             ctx.state
                 .instance
-                .process_log(&logger, block, log, block_state)
+                .process_trigger(&logger, block, trigger, block_state)
                 .map(|block_state| (ctx, block_state))
-                .map_err(|e| format_err!("Failed to process event: {}", e))
+                .map_err(|e| format_err!("Failed to process trigger: {}", e))
         })
 }
 
-fn process_logs_in_runtime_hosts<T>(
+fn process_triggers_in_runtime_hosts<T>(
     logger: Logger,
     runtime_hosts: Vec<Arc<T::Host>>,
     block_state: BlockState,
     block: Arc<EthereumBlock>,
-    logs: Vec<Log>,
+    triggers: Vec<EthereumTrigger>,
 ) -> impl Future<Item = BlockState, Error = CancelableError<Error>>
 where
     T: RuntimeHostBuilder,
 {
-    stream::iter_ok::<_, CancelableError<Error>>(logs)
+    stream::iter_ok::<_, CancelableError<Error>>(triggers)
         // Process events from the block stream
-        .fold(block_state, move |block_state, log| {
+        .fold(block_state, move |block_state, trigger| {
             let logger = logger.clone();
             let block = block.clone();
             let runtime_hosts = runtime_hosts.clone();
 
             // Process the log in each host in the same order the corresponding
             // data sources have been created
-            SubgraphInstance::<T>::process_log_in_runtime_hosts(
+            SubgraphInstance::<T>::process_trigger_in_runtime_hosts(
                 &logger,
                 runtime_hosts.iter().map(|host| host.clone()),
                 block.clone(),
-                log.clone(),
+                trigger,
                 block_state,
             )
         })
@@ -737,9 +747,19 @@ where
     }
 
     // Merge log filters from data sources into the block stream builder
-    ctx.state
-        .log_filter
-        .extend(EthereumLogFilter::from_iter(data_sources.iter()));
+    if let Some(filter) = EthereumLogFilter::from_data_sources_opt(data_sources.iter()) {
+        ctx.state.log_filter = ctx.state.log_filter.extend(filter);
+    }
+
+    // Merge call filters from data sources into the block stream builder
+    if let Some(filter) = EthereumCallFilter::from_data_sources_opt(data_sources.iter()) {
+        ctx.state.call_filter = ctx.state.call_filter.extend(filter);
+    }
+
+    // Merge block filters from data sources into the block stream builder
+    if let Some(filter) = EthereumBlockFilter::from_data_sources_opt(data_sources.iter()) {
+        ctx.state.block_filter = ctx.state.block_filter.extend(filter);
+    }
 
     // Add the new data sources to the subgraph instance
     ctx.state

@@ -19,10 +19,10 @@ use crate::components::store::StoreError;
 use crate::data::query::QueryExecutionError;
 use crate::data::schema::Schema;
 use crate::data::subgraph::schema::{
-    EthereumContractAbiEntity, EthereumContractDataSourceEntity,
-    EthereumContractDataSourceTemplateEntity, EthereumContractDataSourceTemplateSourceEntity,
-    EthereumContractEventHandlerEntity, EthereumContractMappingEntity,
-    EthereumContractSourceEntity,
+    EthereumBlockHandlerEntity, EthereumCallHandlerEntity, EthereumContractAbiEntity,
+    EthereumContractDataSourceEntity, EthereumContractDataSourceTemplateEntity,
+    EthereumContractDataSourceTemplateSourceEntity, EthereumContractEventHandlerEntity,
+    EthereumContractMappingEntity, EthereumContractSourceEntity,
 };
 use crate::util::ethereum::string_to_h256;
 
@@ -225,6 +225,8 @@ pub enum SubgraphRegistrarError {
     QueryExecutionError(QueryExecutionError),
     #[fail(display = "subgraph registrar error with store: {}", _0)]
     StoreError(StoreError),
+    #[fail(display = "subgraph validation error: {:?}", _0)]
+    ManifestValidationError(Vec<SubgraphManifestValidationError>),
     #[fail(display = "subgraph registrar error: {}", _0)]
     Unknown(failure::Error),
 }
@@ -289,6 +291,14 @@ pub enum SubgraphAssignmentProviderEvent {
     SubgraphStart(SubgraphManifest),
     /// The subgraph with the given ID should stop processing.
     SubgraphStop(SubgraphDeploymentId),
+}
+
+#[derive(Fail, Debug)]
+pub enum SubgraphManifestValidationError {
+    #[fail(display = "subgraph source address is required")]
+    SourceAddressRequired,
+    #[fail(display = "subgraph data source has too many similar block handlers")]
+    DataSourceBlockHandlerLimitExceeded,
 }
 
 #[derive(Fail, Debug)]
@@ -405,6 +415,44 @@ impl UnresolvedMappingABI {
 }
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize)]
+pub struct MappingBlockHandler {
+    pub handler: String,
+    pub filter: Option<BlockHandlerFilter>,
+}
+
+#[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum BlockHandlerFilter {
+    // Call filter will trigger on all blocks where the data source contract
+    // address has been called
+    Call,
+}
+
+impl From<EthereumBlockHandlerEntity> for MappingBlockHandler {
+    fn from(entity: EthereumBlockHandlerEntity) -> Self {
+        Self {
+            handler: entity.handler,
+            filter: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize)]
+pub struct MappingCallHandler {
+    pub function: String,
+    pub handler: String,
+}
+
+impl From<EthereumCallHandlerEntity> for MappingCallHandler {
+    fn from(entity: EthereumCallHandlerEntity) -> Self {
+        Self {
+            function: entity.function,
+            handler: entity.handler,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize)]
 pub struct MappingEventHandler {
     pub event: String,
     pub topic0: Option<H256>,
@@ -435,7 +483,9 @@ pub struct UnresolvedMapping {
     pub language: String,
     pub entities: Vec<String>,
     pub abis: Vec<UnresolvedMappingABI>,
-    pub event_handlers: Vec<MappingEventHandler>,
+    pub block_handlers: Option<Vec<MappingBlockHandler>>,
+    pub call_handlers: Option<Vec<MappingCallHandler>>,
+    pub event_handlers: Option<Vec<MappingEventHandler>>,
     pub file: Link,
 }
 
@@ -446,7 +496,9 @@ pub struct Mapping {
     pub language: String,
     pub entities: Vec<String>,
     pub abis: Vec<MappingABI>,
-    pub event_handlers: Vec<MappingEventHandler>,
+    pub block_handlers: Option<Vec<MappingBlockHandler>>,
+    pub call_handlers: Option<Vec<MappingCallHandler>>,
+    pub event_handlers: Option<Vec<MappingEventHandler>>,
     pub runtime: Arc<Module>,
     pub link: Link,
 }
@@ -462,6 +514,8 @@ impl UnresolvedMapping {
             language,
             entities,
             abis,
+            block_handlers,
+            call_handlers,
             event_handlers,
             file: link,
         } = self;
@@ -477,13 +531,15 @@ impl UnresolvedMapping {
                 Ok(Arc::new(parity_wasm::deserialize_buffer(&module_bytes)?))
             }),
         )
-        .map(|(abis, runtime)| Mapping {
+        .map(move |(abis, runtime)| Mapping {
             kind,
             api_version,
             language,
             entities,
             abis,
-            event_handlers,
+            block_handlers: block_handlers.clone(),
+            call_handlers: call_handlers.clone(),
+            event_handlers: event_handlers.clone(),
             runtime,
             link,
         })
@@ -498,7 +554,15 @@ impl From<EthereumContractMappingEntity> for UnresolvedMapping {
             language: entity.language,
             entities: entity.entities,
             abis: entity.abis.into_iter().map(Into::into).collect(),
-            event_handlers: entity.event_handlers.into_iter().map(Into::into).collect(),
+            event_handlers: entity
+                .event_handlers
+                .map(|event_handlers| event_handlers.into_iter().map(Into::into).collect()),
+            call_handlers: entity
+                .call_handlers
+                .map(|call_handlers| call_handlers.into_iter().map(Into::into).collect()),
+            block_handlers: entity
+                .block_handlers
+                .map(|block_handlers| block_handlers.into_iter().map(Into::into).collect()),
             file: entity.file.into(),
         }
     }
@@ -648,6 +712,30 @@ impl UnresolvedDataSourceTemplate {
             source,
             mapping,
         })
+    }
+}
+
+impl DataSourceTemplate {
+    pub fn has_call_handler(&self) -> bool {
+        self.mapping
+            .call_handlers
+            .as_ref()
+            .map_or(false, |handlers| !handlers.is_empty())
+    }
+
+    pub fn has_block_handler_with_call_filter(&self) -> bool {
+        self.mapping
+            .block_handlers
+            .as_ref()
+            .map_or(false, |handlers| {
+                handlers
+                    .iter()
+                    .find(|handler| match handler.filter {
+                        Some(BlockHandlerFilter::Call) => true,
+                        _ => false,
+                    })
+                    .is_some()
+            })
     }
 }
 

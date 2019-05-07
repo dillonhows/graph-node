@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::iter;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::validation;
 use graph::data::subgraph::schema::*;
 use graph::prelude::{
     CreateSubgraphResult, SubgraphAssignmentProvider as SubgraphAssignmentProviderTrait,
@@ -251,6 +252,7 @@ where
         Box::new(
             SubgraphManifest::resolve(hash.to_ipfs_link(), self.resolver.clone())
                 .map_err(SubgraphRegistrarError::ResolveError)
+                .and_then(validation::validate_manifest)
                 .and_then(move |manifest| {
                     create_subgraph_version(
                         &logger,
@@ -274,32 +276,6 @@ where
             self.store.clone(),
             name,
         )))
-    }
-
-    fn list_subgraphs(
-        &self,
-    ) -> Box<Future<Item = Vec<SubgraphName>, Error = SubgraphRegistrarError> + Send + 'static>
-    {
-        Box::new(
-            future::result(self.store.find(SubgraphEntity::query()))
-                .from_err()
-                .and_then(|subgraph_entities| {
-                    subgraph_entities
-                        .into_iter()
-                        .map(|mut entity| {
-                            let name_string = entity.remove("name").unwrap().as_string().unwrap();
-                            SubgraphName::new(name_string.to_owned())
-                                .map_err(|()| {
-                                    format_err!(
-                                        "Subgraph name in store has invalid format: {:?}",
-                                        name_string
-                                    )
-                                })
-                                .map_err(SubgraphRegistrarError::from)
-                        })
-                        .collect::<Result<_, _>>()
-                }),
-        )
     }
 }
 

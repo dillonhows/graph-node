@@ -1,3 +1,4 @@
+use diesel::connection::SimpleConnection;
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager, Pool};
@@ -14,6 +15,7 @@ use graph::components::store::Store as StoreTrait;
 use graph::data::subgraph::schema::*;
 use graph::prelude::{ChainHeadUpdateListener as _, *};
 use graph::serde_json;
+use graph::util::security::SafeDisplay;
 use graph::web3::types::H256;
 use graph::{tokio, tokio::timer::Interval};
 use graph_graphql::prelude::api_schema;
@@ -44,8 +46,19 @@ fn initiate_schema(logger: &Logger, conn: &PgConnection) {
 
     // If there was any migration output, log it now
     if !output.is_empty() {
-        debug!(logger, "Postgres migration output";
-               "output" => String::from_utf8(output).unwrap_or_else(|_| String::from("<unreadable>")));
+        debug!(
+            logger, "Postgres migration output";
+            "output" => String::from_utf8(output)
+                .unwrap_or_else(|_| String::from("<unreadable>"))
+        );
+        // We take getting output as a signal that a migration was actually
+        // run, which is not easy to tell from the Diesel API, and reset the
+        // query statistics since a schema change makes them not all that
+        // useful. An error here is not serious and can be ignored.
+        let res = conn.batch_execute("select pg_stat_statements_reset()");
+        if let Err(e) = res {
+            trace!(logger, "Failed to reset query statistics ({})", e);
+        }
     }
 }
 
@@ -92,7 +105,11 @@ impl Store {
             .error_handler(error_handler)
             .build(conn_manager)
             .unwrap();
-        info!(logger, "Connected to Postgres"; "url" => &config.postgres_url);
+        info!(
+            logger,
+            "Connected to Postgres";
+            "url" => SafeDisplay(config.postgres_url.as_str())
+        );
 
         // Create the entities table (if necessary)
         initiate_schema(&logger, &pool.get().unwrap());

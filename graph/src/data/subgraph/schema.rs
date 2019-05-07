@@ -627,7 +627,9 @@ pub struct EthereumContractMappingEntity {
     pub file: String,
     pub entities: Vec<String>,
     pub abis: Vec<EthereumContractAbiEntity>,
-    pub event_handlers: Vec<EthereumContractEventHandlerEntity>,
+    pub block_handlers: Option<Vec<EthereumBlockHandlerEntity>>,
+    pub call_handlers: Option<Vec<EthereumCallHandlerEntity>>,
+    pub event_handlers: Option<Vec<EthereumContractEventHandlerEntity>>,
 }
 
 impl TypedEntity for EthereumContractMappingEntity {
@@ -646,12 +648,43 @@ impl EthereumContractMappingEntity {
             abi_ids.push(abi_id.into());
         }
 
-        let mut event_handler_ids: Vec<Value> = vec![];
-        for (i, event_handler) in self.event_handlers.into_iter().enumerate() {
-            let handler_id = format!("{}-event-handler-{}", id, i);
-            ops.extend(event_handler.write_operations(&handler_id));
-            event_handler_ids.push(handler_id.into());
-        }
+        let event_handler_ids: Option<Vec<Value>> = self.event_handlers.map(|event_handlers| {
+            event_handlers
+                .into_iter()
+                .enumerate()
+                .map(|(i, event_handler)| {
+                    let handler_id = format!("{}-event-handler-{}", id, i);
+                    ops.extend(event_handler.write_operations(&handler_id));
+                    handler_id
+                })
+                .map(Into::into)
+                .collect()
+        });
+        let call_handler_ids: Option<Vec<Value>> = self.call_handlers.map(|call_handlers| {
+            call_handlers
+                .into_iter()
+                .enumerate()
+                .map(|(i, call_handler)| {
+                    let handler_id = format!("{}-call-handler-{}", id, i);
+                    ops.extend(call_handler.write_operations(&handler_id));
+                    handler_id
+                })
+                .map(Into::into)
+                .collect()
+        });
+
+        let block_handler_ids: Option<Vec<Value>> = self.block_handlers.map(|block_handlers| {
+            block_handlers
+                .into_iter()
+                .enumerate()
+                .map(|(i, block_handler)| {
+                    let handler_id = format!("{}-block-handler-{}", id, i);
+                    ops.extend(block_handler.write_operations(&handler_id));
+                    handler_id
+                })
+                .map(Into::into)
+                .collect()
+        });
 
         let mut entity = Entity::new();
         entity.set("id", id);
@@ -667,7 +700,10 @@ impl EthereumContractMappingEntity {
                 .map(Value::from)
                 .collect::<Vec<Value>>(),
         );
-        entity.set("eventHandlers", event_handler_ids);
+        event_handler_ids.map(|event_handler_ids| entity.set("eventHandlers", event_handler_ids));
+        call_handler_ids.map(|call_handler_ids| entity.set("callHandlers", call_handler_ids));
+        block_handler_ids.map(|block_handler_ids| entity.set("blockHandlers", block_handler_ids));
+
         ops.push(set_entity_operation(Self::TYPENAME, id, entity));
 
         ops
@@ -683,12 +719,18 @@ impl<'a> From<&'a super::Mapping> for EthereumContractMappingEntity {
             file: mapping.link.link.clone(),
             entities: mapping.entities.clone(),
             abis: mapping.abis.iter().map(Into::into).collect(),
+            block_handlers: mapping
+                .block_handlers
+                .clone()
+                .map(|block_handlers| block_handlers.clone().into_iter().map(Into::into).collect()),
+            call_handlers: mapping
+                .call_handlers
+                .clone()
+                .map(|call_handlers| call_handlers.clone().into_iter().map(Into::into).collect()),
             event_handlers: mapping
                 .event_handlers
                 .clone()
-                .into_iter()
-                .map(Into::into)
-                .collect(),
+                .map(|event_handlers| event_handlers.clone().into_iter().map(Into::into).collect()),
         }
     }
 }
@@ -710,7 +752,9 @@ impl TryFromValue for EthereumContractMappingEntity {
             file: map.get_required("file")?,
             entities: map.get_required("entities")?,
             abis: map.get_required("abis")?,
-            event_handlers: map.get_required("eventHandlers")?,
+            event_handlers: map.get_optional("eventHandlers")?,
+            call_handlers: map.get_optional("callHandlers")?,
+            block_handlers: map.get_optional("blockHandlers")?,
         })
     }
 }
@@ -758,6 +802,159 @@ impl TryFromValue for EthereumContractAbiEntity {
         Ok(Self {
             name: map.get_required("name")?,
             file: map.get_required("file")?,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct EthereumBlockHandlerEntity {
+    pub handler: String,
+    pub filter: Option<EthereumBlockHandlerFilterEntity>,
+}
+
+impl EthereumBlockHandlerEntity {
+    fn write_operations(self, id: &str) -> Vec<EntityOperation> {
+        let mut ops = vec![];
+
+        let filter_id: Option<Value> = self.filter.map(|filter| {
+            let filter_id = format!("{}-filter", id);
+            ops.extend(filter.write_operations(&filter_id));
+            filter_id.into()
+        });
+
+        let mut entity = Entity::new();
+        entity.set("id", id);
+        entity.set("handler", self.handler);
+        match filter_id {
+            Some(filter_id) => {
+                entity.set("filter", filter_id);
+            }
+            None => {}
+        }
+        ops.push(set_entity_operation(Self::TYPENAME, id, entity));
+
+        ops
+    }
+}
+
+impl TypedEntity for EthereumBlockHandlerEntity {
+    const TYPENAME: &'static str = "EthereumBlockHandlerEntity";
+    type IdType = String;
+}
+
+impl From<super::MappingBlockHandler> for EthereumBlockHandlerEntity {
+    fn from(block_handler: super::MappingBlockHandler) -> Self {
+        let filter = match block_handler.filter {
+            Some(filter) => match filter {
+                // TODO: Figure out how to use serde to get lowercase spelling here
+                super::BlockHandlerFilter::Call => Some(EthereumBlockHandlerFilterEntity {
+                    kind: "call".to_string(),
+                }),
+            },
+            None => None,
+        };
+        EthereumBlockHandlerEntity {
+            handler: block_handler.handler,
+            filter: filter,
+        }
+    }
+}
+
+impl TryFromValue for EthereumBlockHandlerEntity {
+    fn try_from_value(value: &q::Value) -> Result<Self, Error> {
+        let map = match value {
+            q::Value::Object(map) => Ok(map),
+            _ => Err(format_err!(
+                "Cannot parse value into block handler entity: {:?}",
+                value
+            )),
+        }?;
+
+        Ok(EthereumBlockHandlerEntity {
+            handler: map.get_required("handler")?,
+            filter: map.get_optional("filter")?,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct EthereumBlockHandlerFilterEntity {
+    pub kind: String,
+}
+
+impl TypedEntity for EthereumBlockHandlerFilterEntity {
+    const TYPENAME: &'static str = "EthereumBlockHandlerFilterEntity";
+    type IdType = String;
+}
+
+impl EthereumBlockHandlerFilterEntity {
+    fn write_operations(self, id: &str) -> Vec<EntityOperation> {
+        let mut entity = Entity::new();
+        entity.set("id", id);
+        entity.set("kind", self.kind);
+        vec![set_entity_operation(Self::TYPENAME, id, entity)]
+    }
+}
+
+impl TryFromValue for EthereumBlockHandlerFilterEntity {
+    fn try_from_value(value: &q::Value) -> Result<Self, Error> {
+        let map = match value {
+            q::Value::Object(map) => Ok(map),
+            _ => Err(format_err!(
+                "Cannot parse value into block handler filter entity: {:?}",
+                value,
+            )),
+        }?;
+
+        Ok(Self {
+            kind: map.get_required("kind")?,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct EthereumCallHandlerEntity {
+    pub function: String,
+    pub handler: String,
+}
+
+impl TypedEntity for EthereumCallHandlerEntity {
+    const TYPENAME: &'static str = "EthereumCallHandlerEntity";
+    type IdType = String;
+}
+
+impl EthereumCallHandlerEntity {
+    fn write_operations(self, id: &str) -> Vec<EntityOperation> {
+        let mut entity = Entity::new();
+        entity.set("id", id);
+        entity.set("function", self.function);
+        entity.set("handler", self.handler);
+        vec![set_entity_operation(Self::TYPENAME, id, entity)]
+    }
+}
+
+impl From<super::MappingCallHandler> for EthereumCallHandlerEntity {
+    fn from(call_handler: super::MappingCallHandler) -> Self {
+        Self {
+            function: call_handler.function,
+            handler: call_handler.handler,
+        }
+    }
+}
+
+impl TryFromValue for EthereumCallHandlerEntity {
+    fn try_from_value(value: &q::Value) -> Result<Self, Error> {
+        let map = match value {
+            q::Value::Object(map) => Ok(map),
+            _ => Err(format_err!(
+                "Cannot parse value into call handler entity: {:?}",
+                value
+            )),
+        }?;
+
+        Ok(Self {
+            function: map.get_required("function")?,
+            handler: map.get_required("handler")?,
         })
     }
 }

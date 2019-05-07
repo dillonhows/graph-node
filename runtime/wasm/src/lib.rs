@@ -18,7 +18,7 @@ mod to_from;
 mod host_exports;
 
 use graph::prelude::*;
-use graph::web3::types::{Address, Transaction};
+use graph::web3::types::Address;
 
 pub use self::host::{RuntimeHost, RuntimeHostBuilder, RuntimeHostConfig};
 
@@ -31,22 +31,20 @@ pub(crate) struct UnresolvedContractCall {
 }
 
 #[derive(Debug)]
-pub(crate) struct EventHandlerContext {
+pub(crate) struct MappingContext {
     logger: Logger,
     block: Arc<EthereumBlock>,
-    transaction: Arc<Transaction>,
     state: BlockState,
 }
 
-/// Cloning an `EventHandlerContext` clones all its fields,
+/// Cloning an `MappingContext` clones all its fields,
 /// except the `state_operations`, since they are an output
 /// accumulator and are therefore initialized with an empty state.
-impl Clone for EventHandlerContext {
+impl Clone for MappingContext {
     fn clone(&self) -> Self {
-        EventHandlerContext {
+        MappingContext {
             logger: self.logger.clone(),
             block: self.block.clone(),
-            transaction: self.transaction.clone(),
             state: BlockState::default(),
         }
     }

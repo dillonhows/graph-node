@@ -19,10 +19,10 @@ impl MockBlockStream {
 }
 
 impl Stream for MockBlockStream {
-    type Item = EthereumBlock;
+    type Item = EthereumBlockWithTriggers;
     type Error = Error;
 
-    fn poll(&mut self) -> Result<Async<Option<EthereumBlock>>, Error> {
+    fn poll(&mut self) -> Result<Async<Option<EthereumBlockWithTriggers>>, Error> {
         Ok(Async::Ready(None))
     }
 }
@@ -33,7 +33,17 @@ impl EventConsumer<ChainHeadUpdate> for MockBlockStream {
     }
 }
 
-impl BlockStream for MockBlockStream {}
+impl BlockStream for MockBlockStream {
+    fn parse_triggers(
+        _log_filter_opt: Option<EthereumLogFilter>,
+        _call_filter_opt: Option<EthereumCallFilter>,
+        _block_filter_opt: Option<EthereumBlockFilter>,
+        _include_calls_in_blocks: bool,
+        _descendant_block: EthereumBlockWithCalls,
+    ) -> Result<EthereumBlockWithTriggers, Error> {
+        unimplemented!()
+    }
+}
 
 #[derive(Clone)]
 pub struct MockBlockStreamBuilder;
@@ -51,7 +61,10 @@ impl BlockStreamBuilder for MockBlockStreamBuilder {
         &self,
         _logger: Logger,
         _deployment_id: SubgraphDeploymentId,
-        _log_filter: EthereumLogFilter,
+        _log_filter: Option<EthereumLogFilter>,
+        _call_filter: Option<EthereumCallFilter>,
+        _block_filter: Option<EthereumBlockFilter>,
+        _include_calls_in_blocks: bool,
     ) -> Self::Stream {
         MockBlockStream::new()
     }

@@ -62,8 +62,10 @@ pub mod prelude {
     pub use crate::components::ethereum::{
         BlockStream, BlockStreamBuilder, ChainHeadUpdate, ChainHeadUpdateListener,
         ChainHeadUpdateStream, EthereumAdapter, EthereumAdapterError, EthereumBlock,
-        EthereumBlockData, EthereumBlockPointer, EthereumContractCall, EthereumContractCallError,
-        EthereumEventData, EthereumLogFilter, EthereumNetworkIdentifier, EthereumTransactionData,
+        EthereumBlockData, EthereumBlockFilter, EthereumBlockPointer, EthereumBlockTriggerType,
+        EthereumBlockWithCalls, EthereumBlockWithTriggers, EthereumCall, EthereumCallData,
+        EthereumCallFilter, EthereumContractCall, EthereumContractCallError, EthereumEventData,
+        EthereumLogFilter, EthereumNetworkIdentifier, EthereumTransactionData, EthereumTrigger,
     };
     pub use crate::components::graphql::{
         GraphQlRunner, QueryResultFuture, SubscriptionResultFuture,
@@ -97,10 +99,11 @@ pub mod prelude {
     };
     pub use crate::data::subgraph::schema::{SubgraphDeploymentEntity, TypedEntity};
     pub use crate::data::subgraph::{
-        CreateSubgraphResult, DataSource, DataSourceTemplate, Link, MappingABI,
-        MappingEventHandler, SubgraphAssignmentProviderError, SubgraphAssignmentProviderEvent,
-        SubgraphDeploymentId, SubgraphManifest, SubgraphManifestResolveError, SubgraphName,
-        SubgraphRegistrarError,
+        BlockHandlerFilter, CreateSubgraphResult, DataSource, DataSourceTemplate, Link, MappingABI,
+        MappingBlockHandler, MappingCallHandler, MappingEventHandler,
+        SubgraphAssignmentProviderError, SubgraphAssignmentProviderEvent, SubgraphDeploymentId,
+        SubgraphManifest, SubgraphManifestResolveError, SubgraphManifestValidationError,
+        SubgraphName, SubgraphRegistrarError,
     };
     pub use crate::data::subscription::{
         QueryResultStream, Subscription, SubscriptionError, SubscriptionResult,
